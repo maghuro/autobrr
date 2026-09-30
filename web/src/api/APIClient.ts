@@ -354,6 +354,8 @@ export const APIClient = {
       body: feed
     }),
     fetchCaps: (id: number) => appClient.Get<FeedCaps>(`api/feeds/${id}/caps`),
+    customFields: (id: number) =>
+      appClient.Get<string[]>(`api/feeds/${id}/custom-fields`),
     toggleEnable: (id: number, enabled: boolean) => appClient.Patch(`api/feeds/${id}/enabled`, {
       body: { enabled }
     }),
