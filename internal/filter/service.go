@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/autobrr/autobrr/internal/domain"
+	"github.com/autobrr/autobrr/internal/meta"
 	"github.com/autobrr/autobrr/pkg/errors"
 	"github.com/autobrr/autobrr/pkg/sharedhttp"
 
@@ -92,6 +93,7 @@ type Service struct {
 	notificationSvc notificationService
 
 	httpClient *http.Client
+	userAgent  string
 }
 
 func NewService(log zerolog.Logger, repo filterRepo, actionSvc actionService, releaseRepo releaseRepo, apiService indexerAPIService, indexerSvc indexerService, downloadSvc downloadService, notificationSvc notificationService) *Service {
@@ -108,6 +110,32 @@ func NewService(log zerolog.Logger, repo filterRepo, actionSvc actionService, re
 			Timeout:   time.Second * 120,
 			Transport: sharedhttp.TransportTLSInsecure,
 		},
+		userAgent: meta.GetUserAgent(),
+	}
+}
+
+type filterLogCustomFieldRule struct {
+	Field    string                           `json:"field"`
+	Operator domain.FilterCustomFieldOperator `json:"operator"`
+}
+
+type filterLogData struct {
+	*domain.Filter
+	CustomFields []filterLogCustomFieldRule `json:"custom_fields,omitempty"`
+}
+
+func redactedFilterLogData(filter *domain.Filter) filterLogData {
+	customFields := make([]filterLogCustomFieldRule, 0, len(filter.CustomFields))
+	for _, rule := range filter.CustomFields {
+		customFields = append(customFields, filterLogCustomFieldRule{
+			Field:    rule.Field,
+			Operator: rule.Operator,
+		})
+	}
+
+	return filterLogData{
+		Filter:       filter,
+		CustomFields: customFields,
 	}
 }
 
@@ -217,7 +245,7 @@ func (s *Service) FindByIndexerIdentifier(ctx context.Context, indexer string) (
 
 func (s *Service) Store(ctx context.Context, filter *domain.Filter) error {
 	if err := filter.Validate(); err != nil {
-		s.log.Error().Err(err).Interface("filter_data", filter).Msg("invalid filter")
+		s.log.Error().Err(err).Interface("filter_data", redactedFilterLogData(filter)).Msg("invalid filter")
 		return err
 	}
 
@@ -229,7 +257,7 @@ func (s *Service) Store(ctx context.Context, filter *domain.Filter) error {
 	}
 
 	if err := s.repo.Store(ctx, filter); err != nil {
-		s.log.Error().Err(err).Interface("filter_data", filter).Msg("could not store filter")
+		s.log.Error().Err(err).Interface("filter_data", redactedFilterLogData(filter)).Msg("could not store filter")
 		return err
 	}
 
@@ -238,12 +266,12 @@ func (s *Service) Store(ctx context.Context, filter *domain.Filter) error {
 
 func (s *Service) Update(ctx context.Context, filter *domain.Filter) error {
 	if err := filter.Validate(); err != nil {
-		s.log.Error().Err(err).Interface("filter_data", filter).Msg("validation error")
+		s.log.Error().Err(err).Interface("filter_data", redactedFilterLogData(filter)).Msg("validation error")
 		return err
 	}
 
 	if err := filter.Sanitize(); err != nil {
-		s.log.Error().Err(err).Interface("filter_data", filter).Msg("could not sanitize filter")
+		s.log.Error().Err(err).Interface("filter_data", redactedFilterLogData(filter)).Msg("could not sanitize filter")
 		return err
 	}
 
@@ -368,6 +396,19 @@ func (s *Service) UpdatePartial(ctx context.Context, filter domain.FilterUpdate)
 	if _, err := s.repo.FindByID(ctx, filter.ID); err != nil {
 		s.log.Error().Err(err).Int("filter_id", filter.ID).Msg("could not find filter")
 		return err
+	}
+
+	if err := filter.ValidateCustomFields(); err != nil {
+		s.log.Error().Err(err).Int("filter_id", filter.ID).Msg("invalid custom fields")
+		return err
+	}
+
+	if filter.CustomFields != nil {
+		customFields := slices.Clone(*filter.CustomFields)
+		for i := range customFields {
+			customFields[i].Field = strings.TrimSpace(customFields[i].Field)
+		}
+		filter.CustomFields = &customFields
 	}
 
 	if err := s.validateIndexers(ctx, filter.ID, filter.Indexers); err != nil {
@@ -578,7 +619,7 @@ func (s *Service) CheckFilter(ctx context.Context, f *domain.Filter, release *do
 
 	l.Debug().Msg("checking filter with release")
 
-	l.Trace().Interface("filter_data", f).Msg("checking filter")
+	l.Trace().Interface("filter_data", redactedFilterLogData(f)).Msg("checking filter")
 	l.Trace().Interface("release_data", release).Msg("checking filter for release")
 
 	// do additional fetch to get download counts for filter
@@ -1185,7 +1226,7 @@ func (s *Service) webhook(ctx context.Context, external domain.FilterExternal, r
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "autobrr")
+	req.Header.Set("User-Agent", s.userAgent)
 
 	if external.WebhookHeaders != "" {
 		for header := range strings.SplitSeq(external.WebhookHeaders, ";") {
